@@ -21,6 +21,13 @@ type HostFilter struct {
 	lineNumber    int
 }
 
+type ToolOptions struct {
+	connectionString string
+	context          *context.Context
+	waitGroup        *sync.WaitGroup
+	workQueue        chan *HostFilter
+}
+
 func runQuery(ctx *context.Context, connStr string, hostFilter *HostFilter) {
 	conn, err := pgx.Connect(*ctx, connStr)
 	if err != nil {
@@ -57,12 +64,12 @@ func runQuery(ctx *context.Context, connStr string, hostFilter *HostFilter) {
 	fmt.Println(hostFilter.lineNumber, ": Got", rowCount, "rows", hostFilter.endDateTime)
 }
 
-func runWorker(ctx *context.Context, connStr string, waitGroup *sync.WaitGroup, workQueue chan *HostFilter) {
+func runWorker(opts *ToolOptions) {
 	fmt.Println("Started worker")
-	defer waitGroup.Done()
+	defer opts.waitGroup.Done()
 
-	for hostFilter := range workQueue {
-		runQuery(ctx, connStr, hostFilter)
+	for hostFilter := range opts.workQueue {
+		runQuery(opts.context, opts.connectionString, hostFilter)
 	}
 
 }
@@ -132,17 +139,20 @@ func main() {
 	ctx := context.Background()
 	// TODO: move to environment var
 	connStr := "postgresql://postgres:password@localhost:5432/homework"
-
-	//run a simple query to check our connection
+	workQueue := make(chan *HostFilter, *workers*2)
 	var waitGroup sync.WaitGroup
-	workQueue := make(chan *HostFilter, 5)
 
-	for i := 0; i < *workers; i++ {
-		waitGroup.Add(1)
-		fmt.Println("Running goroutine")
-		go runWorker(&ctx, connStr, &waitGroup, workQueue)
-	}
+	toolOptions := ToolOptions{connStr, &ctx, &waitGroup, workQueue}
 
+	dispatchWork(&toolOptions, *workers)
 	fillWorkQueue(*filename, workQueue)
 	waitGroup.Wait()
+}
+
+func dispatchWork(opts *ToolOptions, workerCount int) {
+	for i := 0; i < workerCount; i++ {
+		opts.waitGroup.Add(1)
+		fmt.Println("Running goroutine")
+		go runWorker(opts)
+	}
 }
