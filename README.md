@@ -76,3 +76,10 @@ select
     group by host, onemin 
     order by onemin;
 ```
+
+Build
+=====
+
+```bash
+go get github.com/jackc/pgx/v4
+```

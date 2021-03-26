@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/csv"
 	"flag"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"sync"
 
@@ -14,6 +18,7 @@ type HostFilter struct {
 	host          string
 	startDateTime string
 	endDateTime   string
+	lineNumber    int
 }
 
 func runQuery(ctx *context.Context, connStr string, hostFilter *HostFilter) {
@@ -22,6 +27,7 @@ func runQuery(ctx *context.Context, connStr string, hostFilter *HostFilter) {
 		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
 		os.Exit(1)
 	}
+	defer conn.Close(*ctx)
 
 	rows, err := conn.Query(*ctx,
 		`select 
@@ -47,29 +53,79 @@ func runQuery(ctx *context.Context, connStr string, hostFilter *HostFilter) {
 	for rows.Next() {
 		rowCount++
 	}
-	conn.Close(*ctx)
 
-	fmt.Println("Got", rowCount, "rows")
+	fmt.Println(hostFilter.lineNumber, ": Got", rowCount, "rows", hostFilter.endDateTime)
 }
 
 func runWorker(ctx *context.Context, connStr string, waitGroup *sync.WaitGroup, workQueue chan *HostFilter) {
 	fmt.Println("Started worker")
 	defer waitGroup.Done()
-	for {
-		select {
-		case hostFilter := <-workQueue:
-			runQuery(ctx, connStr, hostFilter)
-		default:
-			return
-		}
+
+	for hostFilter := range workQueue {
+		runQuery(ctx, connStr, hostFilter)
 	}
+
+}
+
+func getFile(filename string) (*os.File, error) {
+	if filename == "-" {
+		return os.Stdin, nil
+	}
+
+	file, err := os.Open(filename)
+	if err != nil {
+		log.Fatalf("failed to open")
+		return nil, err
+	}
+	return file, nil
+}
+
+func fillWorkQueue(filename string, workQueue chan<- *HostFilter) {
+	file, err := getFile(filename)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Problem reading file")
+		os.Exit(1)
+	}
+	defer file.Close()
+
+	reader := bufio.NewReader(file)
+	csvReader := csv.NewReader(reader)
+
+	fmt.Println("Parsing file")
+
+	line := 1
+	for {
+		record, err := csvReader.Read()
+		if err == io.EOF {
+			break
+		}
+		if line == 1 {
+			// header
+			line++
+			continue
+		}
+
+		if len(record) != 3 {
+			fmt.Fprintf(os.Stderr, "Invalid row")
+			continue
+		}
+
+		workQueue <- &HostFilter{record[0], record[1], record[2], line}
+
+		line++
+	}
+
+	close(workQueue)
 }
 
 //connect to database using a single connection
 func main() {
 	workers := flag.Int("workers", 1, "The number of workers to use")
+	filename := flag.String("params-file", "data/query_params.csv", "The file to load query params from")
+
 	flag.Parse()
 	fmt.Println("Starting with", *workers, "workers")
+	fmt.Println("Starting with", *filename, "filename")
 	/***********************************************/
 	/* Single Connection to TimescaleDB/ PostresQL */
 	/***********************************************/
@@ -79,21 +135,14 @@ func main() {
 
 	//run a simple query to check our connection
 	var waitGroup sync.WaitGroup
-	hostFilters := []HostFilter{
-		{"host_000008", "2017-01-01 08:59:22", "2017-01-01 09:59:22"},
-		{"host_000008", "2017-01-01 08:59:22", "2017-01-01 09:59:22"},
-	}
-
 	workQueue := make(chan *HostFilter, 5)
-
-	for i := range hostFilters {
-		workQueue <- &hostFilters[i]
-	}
 
 	for i := 0; i < *workers; i++ {
 		waitGroup.Add(1)
 		fmt.Println("Running goroutine")
 		go runWorker(&ctx, connStr, &waitGroup, workQueue)
 	}
+
+	fillWorkQueue(*filename, workQueue)
 	waitGroup.Wait()
 }

@@ -13,7 +13,7 @@ Questions
 * Do we care about overlapping queries/duplicate queries? This
   may have some caching impact as well.
 * How do you want to handle invalid inputs? I would default to
-  outputing the line number (perhaps the params themselves),
+  outputting the line number (perhaps the params themselves),
   and having a counter of them.
 * If there is somehow some query failure, how should it count
   in the statistics? (Not really sure how this could happen
