@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"os"
@@ -22,21 +23,27 @@ type HostFilter struct {
 }
 
 type ToolOptions struct {
+	workerCount      int
 	connectionString string
 	context          *context.Context
 	waitGroup        *sync.WaitGroup
 	workQueue        chan *HostFilter
 }
 
-func runQuery(ctx *context.Context, connStr string, hostFilter *HostFilter) {
-	conn, err := pgx.Connect(*ctx, connStr)
+type WorkerDef struct {
+	Id        int
+	WorkQueue chan *HostFilter
+}
+
+func runQuery(opts *ToolOptions, workerDef *WorkerDef, hostFilter *HostFilter) {
+	conn, err := pgx.Connect(*opts.context, opts.connectionString)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
 		os.Exit(1)
 	}
-	defer conn.Close(*ctx)
+	defer conn.Close(*opts.context)
 
-	rows, err := conn.Query(*ctx,
+	rows, err := conn.Query(*opts.context,
 		`select 
             host, 
             time_bucket_gapfill('1 minute', ts) as onemin, 
@@ -61,15 +68,15 @@ func runQuery(ctx *context.Context, connStr string, hostFilter *HostFilter) {
 		rowCount++
 	}
 
-	fmt.Println(hostFilter.lineNumber, ": Got", rowCount, "rows", hostFilter.endDateTime)
+	fmt.Println("<Worker", workerDef.Id, ">", hostFilter.lineNumber, ": Got", rowCount, "rows", hostFilter.endDateTime)
 }
 
-func runWorker(opts *ToolOptions) {
+func runWorker(opts *ToolOptions, workerDef *WorkerDef) {
 	fmt.Println("Started worker")
 	defer opts.waitGroup.Done()
 
-	for hostFilter := range opts.workQueue {
-		runQuery(opts.context, opts.connectionString, hostFilter)
+	for hostFilter := range workerDef.WorkQueue {
+		runQuery(opts, workerDef, hostFilter)
 	}
 
 }
@@ -142,17 +149,46 @@ func main() {
 	workQueue := make(chan *HostFilter, *workers*2)
 	var waitGroup sync.WaitGroup
 
-	toolOptions := ToolOptions{connStr, &ctx, &waitGroup, workQueue}
+	toolOptions := ToolOptions{*workers, connStr, &ctx, &waitGroup, workQueue}
 
 	dispatchWork(&toolOptions, *workers)
 	fillWorkQueue(*filename, workQueue)
 	waitGroup.Wait()
 }
 
+func hashHostFilter(opts *ToolOptions, hostFilter *HostFilter) int {
+	h := fnv.New32a()
+	h.Write([]byte(hostFilter.host))
+	return int(h.Sum32()) % opts.workerCount
+}
+
 func dispatchWork(opts *ToolOptions, workerCount int) {
+	// we want queries for a particular host to always
+	// be queried by the same worker, so we will use
+	// the hash value of the host name to assign to
+	// different workers. Each worker will have their
+	// own channel.
+	var workers []*WorkerDef
 	for i := 0; i < workerCount; i++ {
+		workers = append(workers, &WorkerDef{
+			Id:        i + 1,
+			WorkQueue: make(chan *HostFilter)})
+	}
+
+	for _, worker := range workers {
 		opts.waitGroup.Add(1)
 		fmt.Println("Running goroutine")
-		go runWorker(opts)
+		go runWorker(opts, worker)
 	}
+
+	go func() {
+		for filter := range opts.workQueue {
+			hashValue := hashHostFilter(opts, filter)
+			workers[hashValue].WorkQueue <- filter
+		}
+
+		for _, worker := range workers {
+			close(worker.WorkQueue)
+		}
+	}()
 }
