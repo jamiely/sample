@@ -68,11 +68,12 @@ func runQuery(opts *ToolOptions, workerDef *WorkerDef, hostFilter *HostFilter) {
 		rowCount++
 	}
 
-	fmt.Println("<Worker", workerDef.Id, ">", hostFilter.lineNumber, ": Got", rowCount, "rows", hostFilter.endDateTime)
+	log.Println("Worker", workerDef.Id, "Line", hostFilter.lineNumber, "Host",
+		hostFilter.host, ": Got", rowCount, "rows", hostFilter.endDateTime)
 }
 
 func runWorker(opts *ToolOptions, workerDef *WorkerDef) {
-	fmt.Println("Started worker")
+	log.Println("Started worker", workerDef.Id)
 	defer opts.waitGroup.Done()
 
 	for hostFilter := range workerDef.WorkQueue {
@@ -105,7 +106,7 @@ func fillWorkQueue(filename string, workQueue chan<- *HostFilter) {
 	reader := bufio.NewReader(file)
 	csvReader := csv.NewReader(reader)
 
-	fmt.Println("Parsing file")
+	log.Println("Parsing file", filename)
 
 	line := 1
 	for {
@@ -120,7 +121,7 @@ func fillWorkQueue(filename string, workQueue chan<- *HostFilter) {
 		}
 
 		if len(record) != 3 {
-			fmt.Fprintf(os.Stderr, "Invalid row")
+			fmt.Fprint(os.Stderr, "Invalid row on line", line)
 			continue
 		}
 
@@ -128,6 +129,8 @@ func fillWorkQueue(filename string, workQueue chan<- *HostFilter) {
 
 		line++
 	}
+
+	log.Println("Read", line, "lines from input")
 
 	close(workQueue)
 }
@@ -138,8 +141,15 @@ func main() {
 	filename := flag.String("params-file", "data/query_params.csv", "The file to load query params from")
 
 	flag.Parse()
-	fmt.Println("Starting with", *workers, "workers")
-	fmt.Println("Starting with", *filename, "filename")
+
+	file, err := os.OpenFile("timescale_benchmark.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.SetOutput(file)
+
+	log.Println("Starting with", *workers, "workers")
+	log.Println("Starting with", *filename, "filename")
 	/***********************************************/
 	/* Single Connection to TimescaleDB/ PostresQL */
 	/***********************************************/
@@ -177,7 +187,6 @@ func dispatchWork(opts *ToolOptions, workerCount int) {
 
 	for _, worker := range workers {
 		opts.waitGroup.Add(1)
-		fmt.Println("Running goroutine")
 		go runWorker(opts, worker)
 	}
 
