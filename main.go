@@ -16,18 +16,18 @@ import (
 )
 
 type HostFilter struct {
-	host          string
-	startDateTime string
-	endDateTime   string
-	lineNumber    int
+	Host          string
+	StartDateTime string
+	EndDateTime   string
+	LineNumber    int
 }
 
 type ToolOptions struct {
-	workerCount      int
-	connectionString string
-	context          *context.Context
-	waitGroup        *sync.WaitGroup
-	workQueue        chan *HostFilter
+	WorkerCount      int
+	ConnectionString string
+	Context          *context.Context
+	WaitGroup        *sync.WaitGroup
+	WorkQueue        chan *HostFilter
 }
 
 type WorkerDef struct {
@@ -36,14 +36,14 @@ type WorkerDef struct {
 }
 
 func runQuery(opts *ToolOptions, workerDef *WorkerDef, hostFilter *HostFilter) {
-	conn, err := pgx.Connect(*opts.context, opts.connectionString)
+	conn, err := pgx.Connect(*opts.Context, opts.ConnectionString)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
 		os.Exit(1)
 	}
-	defer conn.Close(*opts.context)
+	defer conn.Close(*opts.Context)
 
-	rows, err := conn.Query(*opts.context,
+	rows, err := conn.Query(*opts.Context,
 		`select 
             host, 
             time_bucket_gapfill('1 minute', ts) as onemin, 
@@ -56,9 +56,9 @@ func runQuery(opts *ToolOptions, workerDef *WorkerDef, hostFilter *HostFilter) {
                             and $3
             group by host, onemin 
             order by onemin;`,
-		hostFilter.host,
-		hostFilter.startDateTime,
-		hostFilter.endDateTime)
+		hostFilter.Host,
+		hostFilter.StartDateTime,
+		hostFilter.EndDateTime)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "QueryRow failed: %v\n", err)
 		os.Exit(1)
@@ -68,13 +68,13 @@ func runQuery(opts *ToolOptions, workerDef *WorkerDef, hostFilter *HostFilter) {
 		rowCount++
 	}
 
-	log.Println("Worker", workerDef.Id, "Line", hostFilter.lineNumber, "Host",
-		hostFilter.host, ": Got", rowCount, "rows", hostFilter.endDateTime)
+	log.Println("Worker", workerDef.Id, "Line", hostFilter.LineNumber, "Host",
+		hostFilter.Host, ": Got", rowCount, "rows", hostFilter.EndDateTime)
 }
 
 func runWorker(opts *ToolOptions, workerDef *WorkerDef) {
 	log.Println("Started worker", workerDef.Id)
-	defer opts.waitGroup.Done()
+	defer opts.WaitGroup.Done()
 
 	for hostFilter := range workerDef.WorkQueue {
 		runQuery(opts, workerDef, hostFilter)
@@ -168,8 +168,8 @@ func main() {
 
 func hashHostFilter(opts *ToolOptions, hostFilter *HostFilter) int {
 	h := fnv.New32a()
-	h.Write([]byte(hostFilter.host))
-	return int(h.Sum32()) % opts.workerCount
+	h.Write([]byte(hostFilter.Host))
+	return int(h.Sum32()) % opts.WorkerCount
 }
 
 func dispatchWork(opts *ToolOptions, workerCount int) {
@@ -186,12 +186,12 @@ func dispatchWork(opts *ToolOptions, workerCount int) {
 	}
 
 	for _, worker := range workers {
-		opts.waitGroup.Add(1)
+		opts.WaitGroup.Add(1)
 		go runWorker(opts, worker)
 	}
 
 	go func() {
-		for filter := range opts.workQueue {
+		for filter := range opts.WorkQueue {
 			hashValue := hashHostFilter(opts, filter)
 			workers[hashValue].WorkQueue <- filter
 		}
