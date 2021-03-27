@@ -6,8 +6,6 @@ services:
     mem_limit: 512MB
     environment:
       POSTGRES_PASSWORD: password
-    ports:
-      - 5432:5432
     volumes:
       - ./schema/cpu_usage.sql:/docker-entrypoint-initdb.d/01_setup_homework.sql
       - ./schema/load_data.sql:/docker-entrypoint-initdb.d/02_load_data.sql
