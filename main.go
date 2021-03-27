@@ -11,8 +11,10 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v4"
+	"github.com/montanaflynn/stats"
 )
 
 type HostFilter struct {
@@ -28,6 +30,7 @@ type ToolOptions struct {
 	Context          *context.Context
 	WaitGroup        *sync.WaitGroup
 	WorkQueue        chan *HostFilter
+	StatsQueue       chan *Statistic
 }
 
 type WorkerDef struct {
@@ -35,14 +38,26 @@ type WorkerDef struct {
 	WorkQueue chan *HostFilter
 }
 
-func runQuery(opts *ToolOptions, workerDef *WorkerDef, hostFilter *HostFilter) {
+type Statistic struct {
+	IsError       bool
+	QueryDuration int64
+}
+
+// don't modify this!
+var StatisticError = Statistic{
+	IsError:       true,
+	QueryDuration: 0,
+}
+
+func runQuery(opts *ToolOptions, workerDef *WorkerDef, hostFilter *HostFilter) error {
 	conn, err := pgx.Connect(*opts.Context, opts.ConnectionString)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 	defer conn.Close(*opts.Context)
 
+	start := time.Now()
 	rows, err := conn.Query(*opts.Context,
 		`select 
             host, 
@@ -59,10 +74,15 @@ func runQuery(opts *ToolOptions, workerDef *WorkerDef, hostFilter *HostFilter) {
 		hostFilter.Host,
 		hostFilter.StartDateTime,
 		hostFilter.EndDateTime)
+	elapsed := time.Since(start)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "QueryRow failed: %v\n", err)
-		os.Exit(1)
+		return err
 	}
+	opts.StatsQueue <- &Statistic{
+		IsError:       false,
+		QueryDuration: int64(elapsed)}
+
 	rowCount := 0
 	for rows.Next() {
 		rowCount++
@@ -70,6 +90,8 @@ func runQuery(opts *ToolOptions, workerDef *WorkerDef, hostFilter *HostFilter) {
 
 	log.Println("Worker", workerDef.Id, "Line", hostFilter.LineNumber, "Host",
 		hostFilter.Host, ": Got", rowCount, "rows", hostFilter.EndDateTime)
+
+	return nil
 }
 
 func runWorker(opts *ToolOptions, workerDef *WorkerDef) {
@@ -77,7 +99,10 @@ func runWorker(opts *ToolOptions, workerDef *WorkerDef) {
 	defer opts.WaitGroup.Done()
 
 	for hostFilter := range workerDef.WorkQueue {
-		runQuery(opts, workerDef, hostFilter)
+		err := runQuery(opts, workerDef, hostFilter)
+		if err != nil {
+			opts.StatsQueue <- &StatisticError
+		}
 	}
 
 }
@@ -159,11 +184,62 @@ func main() {
 	workQueue := make(chan *HostFilter, *workers*2)
 	var waitGroup sync.WaitGroup
 
-	toolOptions := ToolOptions{*workers, connStr, &ctx, &waitGroup, workQueue}
+	toolOptions := ToolOptions{
+		WorkerCount:      *workers,
+		ConnectionString: connStr,
+		Context:          &ctx,
+		WaitGroup:        &waitGroup,
+		WorkQueue:        workQueue,
+		StatsQueue:       make(chan *Statistic, 5),
+	}
 
-	dispatchWork(&toolOptions, *workers)
+	var statsWait sync.WaitGroup
+	go processStatistics(&toolOptions, &statsWait)
+	go dispatchWork(&toolOptions, *workers)
 	fillWorkQueue(*filename, workQueue)
+
 	waitGroup.Wait()
+	close(toolOptions.StatsQueue)
+	statsWait.Wait()
+}
+
+func processStatistics(opts *ToolOptions, statsWait *sync.WaitGroup) {
+	statsWait.Add(1)
+	count := 0
+	errors := 0
+	var timings []float64
+	for stat := range opts.StatsQueue {
+		count++
+		if stat.IsError {
+			errors++
+			continue
+		}
+
+		nanoseconds := float64(stat.QueryDuration) * 1e-6
+		timings = append(timings, nanoseconds)
+	}
+
+	mean, _ := stats.Mean(timings)
+	median, _ := stats.Median(timings)
+	sum, _ := stats.Sum(timings)
+	min, _ := stats.Min(timings)
+	max, _ := stats.Max(timings)
+
+	fmt.Printf(`Statistics
+============
+Workers: %d
+Total queries: %d
+Errors: %d
+Total time: %fms
+Minimum query time: %fms
+Mean: %fms
+Median: %fms
+Maximum query time: %fms
+`,
+		opts.WorkerCount,
+		count, errors, sum,
+		min, mean, median, max)
+	statsWait.Done()
 }
 
 func hashHostFilter(opts *ToolOptions, hostFilter *HostFilter) int {
