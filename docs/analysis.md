@@ -7,7 +7,9 @@ Design decisions I made and Why
   that the difference was negligble and that we weren't
   calculating the time it takes to create a connection so
   it would not matter either way. Theoretically we only
-  need one connection per worker.
+  need one connection per worker. There might be some
+  overhead in establishing connections that effects running
+  queries.
 
 Decisions I made in the interest of time
 ========================================
