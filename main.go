@@ -26,10 +26,11 @@ type HostFilter struct {
 
 type ToolOptions struct {
 	WorkerCount      int
+	ParamFilename    string
 	ConnectionString string
 	Context          *context.Context
-	WaitGroup        *sync.WaitGroup
-	WorkQueue        chan *HostFilter
+	WorkerWaitGroup  *sync.WaitGroup
+	HostFilterQueue  chan *HostFilter
 	StatsQueue       chan *Statistic
 }
 
@@ -49,6 +50,8 @@ var StatisticError = Statistic{
 	QueryDuration: 0,
 }
 
+// Runs a query against the database based on the passed
+// host filter.
 func runQuery(opts *ToolOptions, workerDef *WorkerDef, hostFilter *HostFilter) error {
 	conn, err := pgx.Connect(*opts.Context, opts.ConnectionString)
 	if err != nil {
@@ -94,9 +97,12 @@ func runQuery(opts *ToolOptions, workerDef *WorkerDef, hostFilter *HostFilter) e
 	return nil
 }
 
+// Runs the worker defined by the passed worker definition.
+// The worker will read all tasks from its own work queue
+// until close.
 func runWorker(opts *ToolOptions, workerDef *WorkerDef) {
 	log.Println("Started worker", workerDef.Id)
-	defer opts.WaitGroup.Done()
+	defer opts.WorkerWaitGroup.Done()
 
 	for hostFilter := range workerDef.HostFilterQueue {
 		err := runQuery(opts, workerDef, hostFilter)
@@ -107,6 +113,8 @@ func runWorker(opts *ToolOptions, workerDef *WorkerDef) {
 
 }
 
+// Retrieves the file to use. If `-` is given,
+// we will load data from stdin.
 func getFile(filename string) (*os.File, error) {
 	if filename == "-" {
 		return os.Stdin, nil
@@ -120,8 +128,11 @@ func getFile(filename string) (*os.File, error) {
 	return file, nil
 }
 
-func fillWorkQueue(filename string, workQueue chan<- *HostFilter) {
-	file, err := getFile(filename)
+// Fills the primary work queue by reading the params
+// file, marshalling those params into host filters,
+// and sending them to the channel.
+func fillWorkQueue(opts *ToolOptions) {
+	file, err := getFile(opts.ParamFilename)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Problem reading file")
 		os.Exit(1)
@@ -131,7 +142,7 @@ func fillWorkQueue(filename string, workQueue chan<- *HostFilter) {
 	reader := bufio.NewReader(file)
 	csvReader := csv.NewReader(reader)
 
-	log.Println("Parsing file", filename)
+	log.Println("Parsing file", opts.ParamFilename)
 
 	line := 1
 	for {
@@ -140,7 +151,7 @@ func fillWorkQueue(filename string, workQueue chan<- *HostFilter) {
 			break
 		}
 		if line == 1 {
-			// header
+			// we always assume the first line will be a header.
 			line++
 			continue
 		}
@@ -150,18 +161,24 @@ func fillWorkQueue(filename string, workQueue chan<- *HostFilter) {
 			continue
 		}
 
-		workQueue <- &HostFilter{record[0], record[1], record[2], line}
+		opts.HostFilterQueue <- &HostFilter{
+			Host:          record[0],
+			StartDateTime: record[1],
+			EndDateTime:   record[2],
+			LineNumber:    line,
+		}
 
 		line++
 	}
 
 	log.Println("Read", line, "lines from input")
 
-	close(workQueue)
+	close(opts.HostFilterQueue)
 }
 
-//connect to database using a single connection
-func main() {
+// Loads the main context of the program including command
+// line arguments and environment variables.
+func loadToolOptions() *ToolOptions {
 	workers := flag.Int("workers", 1, "The number of workers to use")
 	filename := flag.String("params-file", "data/query_params.csv", "The file to load query params from")
 
@@ -175,34 +192,42 @@ func main() {
 
 	log.Println("Starting with", *workers, "workers")
 	log.Println("Starting with", *filename, "filename")
-	/***********************************************/
-	/* Single Connection to TimescaleDB/ PostresQL */
-	/***********************************************/
 	ctx := context.Background()
-	// TODO: move to environment var
-	connStr := "postgresql://postgres:password@localhost:5432/homework"
+	connStr := os.Getenv("CONNECTION_STRING")
+	if connStr == "" {
+		connStr = "postgresql://postgres:password@localhost:5432/homework"
+		log.Println("Using default connection string (localhost)")
+	}
 	workQueue := make(chan *HostFilter, *workers*2)
 	var waitGroup sync.WaitGroup
 
 	toolOptions := ToolOptions{
 		WorkerCount:      *workers,
+		ParamFilename:    *filename,
 		ConnectionString: connStr,
 		Context:          &ctx,
-		WaitGroup:        &waitGroup,
-		WorkQueue:        workQueue,
+		WorkerWaitGroup:  &waitGroup,
+		HostFilterQueue:  workQueue,
 		StatsQueue:       make(chan *Statistic, 5),
 	}
 
-	var statsWait sync.WaitGroup
-	go processStatistics(&toolOptions, &statsWait)
-	go dispatchWorkAcrossWorkers(&toolOptions, *workers)
-	fillWorkQueue(*filename, workQueue)
+	return &toolOptions
+}
 
-	waitGroup.Wait()
+func main() {
+	toolOptions := loadToolOptions()
+
+	var statsWait sync.WaitGroup
+	go processStatistics(toolOptions, &statsWait)
+	go dispatchWorkAcrossWorkers(toolOptions)
+	fillWorkQueue(toolOptions)
+
+	toolOptions.WorkerWaitGroup.Wait()
 	close(toolOptions.StatsQueue)
 	statsWait.Wait()
 }
 
+// Calculates and expels the statistics to stdout
 func processStatistics(opts *ToolOptions, statsWait *sync.WaitGroup) {
 	statsWait.Add(1)
 	count := 0
@@ -251,24 +276,24 @@ func getWorkerIndex(opts *ToolOptions, hostFilter *HostFilter) int {
 }
 
 // Creates `workerCount` workers and dispatches tasks
-// across them from the primary host filter queue.
+// across them from the primary host filter queue (fan-out).
 // Maintains consistency between worker and host names
 // by hashing the host name.
-func dispatchWorkAcrossWorkers(opts *ToolOptions, workerCount int) {
+func dispatchWorkAcrossWorkers(opts *ToolOptions) {
 	var workers []*WorkerDef
-	for i := 0; i < workerCount; i++ {
+	for i := 0; i < opts.WorkerCount; i++ {
 		workers = append(workers, &WorkerDef{
 			Id:              i + 1,
 			HostFilterQueue: make(chan *HostFilter)})
 	}
 
 	for _, worker := range workers {
-		opts.WaitGroup.Add(1)
+		opts.WorkerWaitGroup.Add(1)
 		go runWorker(opts, worker)
 	}
 
 	go func() {
-		for filter := range opts.WorkQueue {
+		for filter := range opts.HostFilterQueue {
 			workerIndex := getWorkerIndex(opts, filter)
 			workers[workerIndex].HostFilterQueue <- filter
 		}
