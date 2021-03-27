@@ -17,5 +17,5 @@ docker-compose up -d
 # run using the default params file
 docker-compose run benchmark -workers 10
 # or use stdin
-<params.csv docker-compose run benchmark -workers 10 -params-file -
+<./data/query_params.csv docker-compose run benchmark -workers 10 -params-file -
 ```
