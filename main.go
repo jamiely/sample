@@ -34,8 +34,8 @@ type ToolOptions struct {
 }
 
 type WorkerDef struct {
-	Id        int
-	WorkQueue chan *HostFilter
+	Id              int
+	HostFilterQueue chan *HostFilter
 }
 
 type Statistic struct {
@@ -98,7 +98,7 @@ func runWorker(opts *ToolOptions, workerDef *WorkerDef) {
 	log.Println("Started worker", workerDef.Id)
 	defer opts.WaitGroup.Done()
 
-	for hostFilter := range workerDef.WorkQueue {
+	for hostFilter := range workerDef.HostFilterQueue {
 		err := runQuery(opts, workerDef, hostFilter)
 		if err != nil {
 			opts.StatsQueue <- &StatisticError
@@ -195,7 +195,7 @@ func main() {
 
 	var statsWait sync.WaitGroup
 	go processStatistics(&toolOptions, &statsWait)
-	go dispatchWork(&toolOptions, *workers)
+	go dispatchWorkAcrossWorkers(&toolOptions, *workers)
 	fillWorkQueue(*filename, workQueue)
 
 	waitGroup.Wait()
@@ -242,23 +242,24 @@ Maximum query time: %fms
 	statsWait.Done()
 }
 
-func hashHostFilter(opts *ToolOptions, hostFilter *HostFilter) int {
+// Determines the index of the worker that should process the
+// given host filter.
+func getWorkerIndex(opts *ToolOptions, hostFilter *HostFilter) int {
 	h := fnv.New32a()
 	h.Write([]byte(hostFilter.Host))
 	return int(h.Sum32()) % opts.WorkerCount
 }
 
-func dispatchWork(opts *ToolOptions, workerCount int) {
-	// we want queries for a particular host to always
-	// be queried by the same worker, so we will use
-	// the hash value of the host name to assign to
-	// different workers. Each worker will have their
-	// own channel.
+// Creates `workerCount` workers and dispatches tasks
+// across them from the primary host filter queue.
+// Maintains consistency between worker and host names
+// by hashing the host name.
+func dispatchWorkAcrossWorkers(opts *ToolOptions, workerCount int) {
 	var workers []*WorkerDef
 	for i := 0; i < workerCount; i++ {
 		workers = append(workers, &WorkerDef{
-			Id:        i + 1,
-			WorkQueue: make(chan *HostFilter)})
+			Id:              i + 1,
+			HostFilterQueue: make(chan *HostFilter)})
 	}
 
 	for _, worker := range workers {
@@ -268,12 +269,12 @@ func dispatchWork(opts *ToolOptions, workerCount int) {
 
 	go func() {
 		for filter := range opts.WorkQueue {
-			hashValue := hashHostFilter(opts, filter)
-			workers[hashValue].WorkQueue <- filter
+			workerIndex := getWorkerIndex(opts, filter)
+			workers[workerIndex].HostFilterQueue <- filter
 		}
 
 		for _, worker := range workers {
-			close(worker.WorkQueue)
+			close(worker.HostFilterQueue)
 		}
 	}()
 }
