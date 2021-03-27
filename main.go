@@ -181,10 +181,11 @@ func fillWorkQueue(opts *ToolOptions) {
 func loadToolOptions() *ToolOptions {
 	workers := flag.Int("workers", 1, "The number of workers to use")
 	filename := flag.String("params-file", "data/query_params.csv", "The file to load query params from")
+	// showHelp := flag.Bool("help", false, "Show help")
 
 	flag.Parse()
 
-	file, err := os.OpenFile("timescale_benchmark.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+	file, err := os.OpenFile("logs/timescale_benchmark.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -1,0 +1,27 @@
+version: '2.4'
+services:
+  timescaledb:
+    image: timescale/timescaledb:2.1.0-pg13
+    cpu_count: 1
+    mem_limit: 512MB
+    environment:
+      POSTGRES_PASSWORD: password
+    ports:
+      - 5432:5432
+    volumes:
+      - ./schema/cpu_usage.sql:/docker-entrypoint-initdb.d/01_setup_homework.sql
+      - ./schema/load_data.sql:/docker-entrypoint-initdb.d/02_load_data.sql
+      - ./pgdata:/var/lib/postgresql/data
+      - ./data:/working/data
+    restart: always
+  benchmark:
+    environment:
+      CONNECTION_STRING: postgresql://postgres:password@timescaledb:5432/homework
+    build:
+      context: .
+    entrypoint: /benchmark
+    command:
+      - -h
+    volumes:
+      - ./data:/data:ro
+      - ./logs:/logs:rw
